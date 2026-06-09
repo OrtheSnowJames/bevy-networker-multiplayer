@@ -93,7 +93,7 @@ fn setup(mut net: ResMut<NetResource>, mode: Res<DemoMode>) {
 
 That pattern is enough to get a server running, connect a client, and let the plugin handle replication, resource sync, and typed messages.
 
-Basic moving-cubes demo:
+Basic moving-cubes demo without prediction:
 
 ```bash
 cargo run --example cubes_demo -- server
@@ -101,6 +101,25 @@ cargo run --example cubes_demo -- client
 ```
 
 The server starts a shared world of replicated cubes and moves them every frame. Each client opens its own window, receives the cube state, and renders the same motion locally. The cube visuals come from `#[sync(prefab(...))]`, so the client does not need custom visual spawn systems. New clients also receive a snapshot of the current state when they connect.
+
+Client-side movement prediction lives in a separate example:
+
+```bash
+cargo run --example cubes_demo_prediction --features prediction -- server
+cargo run --example cubes_demo_prediction --features prediction -- client
+```
+
+The prediction API is derived on tuple structs:
+
+```rust
+#[cfg(feature = "prediction")]
+#[derive(Component, PredictLinearMotion)]
+struct Position(Vec2);
+
+#[cfg(feature = "prediction")]
+#[derive(Component, Velocity2d)]
+struct Velocity(Vec2);
+```
 
 ## Example
 

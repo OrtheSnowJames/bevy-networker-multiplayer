@@ -1,5 +1,9 @@
+#![cfg(feature = "prediction")]
 use bevy::prelude::*;
-use bevy_networker_multiplayer::{sync, NetResource, Replicated, ReplicatedPlugin};
+use bevy_networker_multiplayer::{
+    sync, LinearMotionPredictionPlugin, NetResource, PredictLinearMotion, Replicated,
+    ReplicatedPlugin, Velocity2d,
+};
 
 const ADDRESS: &str = "127.0.0.1:5003";
 
@@ -7,11 +11,11 @@ const ADDRESS: &str = "127.0.0.1:5003";
     Color::srgb(0.2, 0.8, 1.0),
     Vec2::splat(32.0),
 ), Transform::from_xyz(0.0, 0.0, 0.0)))]
-#[derive(Component)]
+#[derive(Component, PredictLinearMotion)]
 struct Position(Vec2);
 
 #[sync]
-#[derive(Component)]
+#[derive(Component, Velocity2d)]
 struct Velocity(Vec2);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,7 +35,7 @@ fn main() {
     if mode == Mode::Client {
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Bevy Networker Multiplayer - Cubes".into(),
+                title: "Bevy Networker Multiplayer - Cubes (Prediction)".into(),
                 resolution: (960, 540).into(),
                 ..default()
             }),
@@ -42,6 +46,7 @@ fn main() {
     }
 
     app.add_plugins(ReplicatedPlugin);
+    app.add_plugins(LinearMotionPredictionPlugin::<Position, Velocity>::new());
     app.insert_resource(DemoMode(mode));
     app.add_systems(Startup, setup);
 
@@ -63,7 +68,9 @@ fn parse_mode() -> Mode {
         Some("server") => Mode::Server,
         Some("client") => Mode::Client,
         _ => {
-            eprintln!("usage: cargo run --example cubes_demo -- [server|client]");
+            eprintln!(
+                "usage: cargo run --example cubes_demo_prediction --features prediction -- [server|client]"
+            );
             std::process::exit(1);
         }
     }

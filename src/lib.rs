@@ -6,16 +6,26 @@ pub use bevy;
 pub use inventory;
 pub extern crate networker_rs;
 pub use serde;
-pub use bevy_networker_multiplayer_macros::{netmsg, sync};
+pub use bevy_networker_multiplayer_macros::{
+    netmsg, sync, PredictLinearMotion, Velocity2d,
+};
 
 pub mod netres;
 pub mod netmsg;
 pub mod replicated;
+#[cfg(feature = "prediction")]
+pub mod prediction;
 pub mod sync;
 
 pub use netres::NetResource;
 pub use netmsg::NetMessage;
 pub use replicated::{Replicated, ReplicatedPlugin};
+#[cfg(feature = "prediction")]
+pub use prediction::{
+    LinearMotionPredictionPlugin,
+    PredictLinearMotion,
+    Velocity2d,
+};
 
 /// Returns the crate name.
 pub fn crate_name() -> &'static str {

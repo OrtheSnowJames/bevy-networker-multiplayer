@@ -5,9 +5,11 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
     token::Comma,
+    Data,
     Expr,
     Error,
     Fields,
+    DeriveInput,
     ItemStruct,
     Path,
     Token,
@@ -96,6 +98,16 @@ pub fn netmsg(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let item = parse_macro_input!(input as ItemStruct);
     expand_netmsg(item).into()
+}
+
+#[proc_macro_derive(PredictLinearMotion)]
+pub fn derive_predict_linear_motion(input: TokenStream) -> TokenStream {
+    expand_prediction_derive(input, PredictionDeriveKind::PredictLinearMotion).into()
+}
+
+#[proc_macro_derive(Velocity2d)]
+pub fn derive_velocity_2d(input: TokenStream) -> TokenStream {
+    expand_prediction_derive(input, PredictionDeriveKind::Velocity2d).into()
 }
 
 fn parse_sync_args(args: TokenStream) -> Result<SyncArgs, TokenStream> {
@@ -397,6 +409,70 @@ fn expand_netmsg(item: ItemStruct) -> proc_macro2::TokenStream {
             const TYPE_PATH: &'static str = concat!(module_path!(), "::", stringify!(#ident));
             const WIRE_ID: u64 = ::bevy_networker_multiplayer::netmsg::hash_type_path(Self::TYPE_PATH);
         }
+    }
+}
+
+enum PredictionDeriveKind {
+    PredictLinearMotion,
+    Velocity2d,
+}
+
+fn expand_prediction_derive(
+    input: TokenStream,
+    kind: PredictionDeriveKind,
+) -> proc_macro2::TokenStream {
+    let input = match syn::parse::<DeriveInput>(input) {
+        Ok(input) => input,
+        Err(error) => return error.to_compile_error(),
+    };
+    let ident = input.ident;
+    let generics = input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let field_error = match kind {
+        PredictionDeriveKind::PredictLinearMotion => {
+            "PredictLinearMotion can only be derived for tuple structs with one Vec2 field"
+        }
+        PredictionDeriveKind::Velocity2d => {
+            "Velocity2d can only be derived for tuple structs with one Vec2 field"
+        }
+    };
+
+    match input.data {
+        Data::Struct(data) => match data.fields {
+            Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1 && is_vec2_type(&fields.unnamed[0].ty) => {}
+            _ => return Error::new_spanned(ident, field_error).to_compile_error(),
+        },
+        _ => return Error::new_spanned(ident, field_error).to_compile_error(),
+    }
+
+    match kind {
+        PredictionDeriveKind::PredictLinearMotion => quote! {
+            impl #impl_generics ::bevy_networker_multiplayer::prediction::PredictLinearMotion
+                for #ident #ty_generics #where_clause
+            {
+                fn predicted_position(&self) -> ::bevy_networker_multiplayer::bevy::prelude::Vec2 {
+                    self.0
+                }
+
+                fn set_predicted_position(
+                    &mut self,
+                    position: ::bevy_networker_multiplayer::bevy::prelude::Vec2,
+                ) {
+                    self.0 = position;
+                }
+            }
+        },
+        PredictionDeriveKind::Velocity2d => quote! {
+            impl #impl_generics ::bevy_networker_multiplayer::prediction::Velocity2d
+                for #ident #ty_generics #where_clause
+            {
+                fn velocity_2d(&self) -> ::bevy_networker_multiplayer::bevy::prelude::Vec2 {
+                    self.0
+                }
+            }
+        },
     }
 }
 

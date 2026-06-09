@@ -1,14 +1,18 @@
 [package]
 name = "bevy-networker-multiplayer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Tiny Bevy networking plugin with automatic entity replication and resource sync."
 repository = "https://github.com/OrtheSnowJames/bevy-networker-multiplayer"
 
+[features]
+default = []
+prediction = []
+
 [workspace]
 resolver = "3"
-members = ["crates/bevy-networker-multiplayer-macros", "vendor/networker-rs"]
+members = ["crates/bevy-networker-multiplayer-macros"]
 
 [dependencies]
 bevy = "0.18.1"
@@ -16,8 +20,9 @@ bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-
 bincode = { version = "2.0.1", features = ["serde"] }
 base64 = "0.22.1"
 inventory = "0.3.21"
-networker-rs = "0.1.5"
+networker-rs = "0.1.6"
 serde = { version = "1.0.228", features = ["derive"] }
 
-[patch.crates-io]
-networker-rs = { path = "vendor/networker-rs" }
+[[example]]
+name = "cubes_demo_prediction"
+required-features = ["prediction"]
