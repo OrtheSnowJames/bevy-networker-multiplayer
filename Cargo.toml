@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Tiny Bevy networking plugin with automatic entity replication and resource sync."
+repository = "https://github.com/OrtheSnowJames/bevy-networker-multiplayer"
 
 [workspace]
 resolver = "3"
