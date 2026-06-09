@@ -1,0 +1,22 @@
+[package]
+name = "bevy-networker-multiplayer"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Tiny Bevy networking plugin with automatic entity replication and resource sync."
+
+[workspace]
+resolver = "3"
+members = ["crates/bevy-networker-multiplayer-macros", "vendor/networker-rs"]
+
+[dependencies]
+bevy = "0.18.1"
+bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-macros" }
+bincode = { version = "2.0.1", features = ["serde"] }
+base64 = "0.22.1"
+inventory = "0.3.21"
+networker-rs = "0.1.5"
+serde = { version = "1.0.228", features = ["derive"] }
+
+[patch.crates-io]
+networker-rs = { path = "vendor/networker-rs" }
