@@ -131,7 +131,7 @@ cargo run --example replication_demo -- client
 ```
 
 The server spawns a replicated entity and moves it once per second.
-The client connects over TCP, receives spawn/update packets, and prints the replicated state it sees.
+The client connects over UDP, receives spawn/update packets, and prints the replicated state it sees.
 
 Run the message demo in two terminals:
 
@@ -144,5 +144,5 @@ The client sends chat and shoot messages. The server prints chat, broadcasts a r
 
 ## Notes
 
-- Uses TCP for now
+- Uses UDP via `networker-rs`
 - I found out [lightyear](https://github.com/cBournhonesque/lightyear/) existed just after making this

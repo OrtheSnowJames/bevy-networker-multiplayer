@@ -3684,9 +3684,9 @@ dependencies = [
 
 [[package]]
 name = "networker-rs"
-version = "0.1.6"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6f6b2184e8284a9a3622ab787b6f00097a405e1c33e309ee8a673dedc893fc8"
+checksum = "53f0e0ddf25a41e417258d42b51df47a7a1596057eceea8294289eb767b0d9bc"
 dependencies = [
  "base64 0.22.1",
  "hyper",

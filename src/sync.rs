@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: MIT
+//! Sync registration, snapshots, and packet application.
+//!
+//! This module is the bridge between Bevy ECS state and the wire format used by
+//! `NetResource`. Attribute macros submit metadata into `inventory`; this module
+//! collects that metadata, registers systems, and translates packets in both
+//! directions.
 use bevy::prelude::*;
 use bincode::config;
 use serde::{de::DeserializeOwned, Serialize};
@@ -9,39 +15,61 @@ use crate::{
     replicated::{EntityIndex, NetworkId, NextNetworkId, Replicated},
 };
 
+/// Metadata for a syncable component type.
 #[derive(Debug, Clone, Copy)]
 pub struct ComponentRegistration {
+    /// Stable type path for diagnostics and registry lookup.
     pub type_path: &'static str,
+    /// Stable wire identifier for the component type.
     pub wire_id: u64,
+    /// Registration callback that installs Bevy systems.
     pub register: fn(&mut App),
+    /// Applies a decoded component update to an entity.
     pub apply: fn(&mut World, Entity, &[u8]),
+    /// Produces full-state snapshots for late joiners.
     pub snapshot: fn(&mut World) -> Vec<ReplicationPacket>,
 }
 
+// `inventory` collection of all component registrations.
 inventory::collect!(ComponentRegistration);
 
+/// Metadata for a syncable resource type.
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceRegistration {
+    /// Stable type path for diagnostics and registry lookup.
     pub type_path: &'static str,
+    /// Stable wire identifier for the resource type.
     pub wire_id: u64,
+    /// Registration callback that installs Bevy systems.
     pub register: fn(&mut App),
+    /// Applies a decoded resource update to the world.
     pub apply: fn(&mut World, &[u8]),
+    /// Produces a snapshot packet for the resource.
     pub snapshot: fn(&mut World) -> Vec<ReplicationPacket>,
 }
 
+// `inventory` collection of all resource registrations.
 inventory::collect!(ResourceRegistration);
 
+/// Metadata for a prefab definition used to spawn visuals remotely.
 #[derive(Debug, Clone, Copy)]
 pub struct PrefabRegistration {
+    /// Stable type path for diagnostics and registry lookup.
     pub type_path: &'static str,
+    /// Stable wire identifier for the prefab.
     pub wire_id: u64,
+    /// Registration callback that can install any companion systems.
     pub register: fn(&mut App),
+    /// Returns true when an entity should be tagged with this prefab.
     pub matches: fn(&World, Entity) -> bool,
+    /// Applies the prefab's visual or structural components.
     pub apply: fn(&mut World, Entity),
 }
 
+// `inventory` collection of all prefab registrations.
 inventory::collect!(PrefabRegistration);
 
+/// Runtime registry for component sync handlers.
 #[derive(Resource, Default)]
 pub struct SyncRegistry {
     by_wire_id: HashMap<u64, ComponentRegistration>,
@@ -49,16 +77,19 @@ pub struct SyncRegistry {
 }
 
 impl SyncRegistry {
+    /// Registers one component handler.
     pub fn register(&mut self, registration: ComponentRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
         self.by_type_path.insert(registration.type_path, registration);
     }
 
+    /// Looks up a component handler by wire ID.
     pub fn by_wire_id(&self, wire_id: u64) -> Option<&ComponentRegistration> {
         self.by_wire_id.get(&wire_id)
     }
 }
 
+/// Runtime registry for resource sync handlers.
 #[derive(Resource, Default)]
 pub struct SyncResourceRegistry {
     by_wire_id: HashMap<u64, ResourceRegistration>,
@@ -66,34 +97,44 @@ pub struct SyncResourceRegistry {
 }
 
 impl SyncResourceRegistry {
+    /// Registers one resource handler.
     pub fn register(&mut self, registration: ResourceRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
         self.by_type_path.insert(registration.type_path, registration);
     }
 
+    /// Looks up a resource handler by wire ID.
     pub fn by_wire_id(&self, wire_id: u64) -> Option<&ResourceRegistration> {
         self.by_wire_id.get(&wire_id)
     }
 }
 
+/// Trait implemented by syncable components.
 pub trait SyncComponent:
     Component + Serialize + DeserializeOwned + Clone + Send + Sync + 'static
 {
+    /// Fully qualified type path.
     const TYPE_PATH: &'static str;
+    /// Stable wire identifier.
     const WIRE_ID: u64;
 }
 
+/// Trait implemented by syncable resources.
 pub trait SyncResource:
     Resource + Serialize + DeserializeOwned + Clone + Send + Sync + 'static
 {
+    /// Fully qualified type path.
     const TYPE_PATH: &'static str;
+    /// Stable wire identifier.
     const WIRE_ID: u64;
 }
 
+/// Internal component used to remember which prefab a replicated entity uses.
 #[derive(Component, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[doc(hidden)]
 pub struct PrefabId(pub u64);
 
+/// Runtime registry for prefab handlers.
 #[derive(Resource, Default)]
 pub struct PrefabRegistry {
     by_wire_id: HashMap<u64, PrefabRegistration>,
@@ -101,20 +142,24 @@ pub struct PrefabRegistry {
 }
 
 impl PrefabRegistry {
+    /// Registers one prefab handler.
     pub fn register(&mut self, registration: PrefabRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
         self.by_type_path.insert(registration.type_path, registration);
     }
 
+    /// Looks up a prefab handler by wire ID.
     pub fn by_wire_id(&self, wire_id: u64) -> Option<&PrefabRegistration> {
         self.by_wire_id.get(&wire_id)
     }
 
+    /// Iterates over all prefab registrations.
     pub fn all(&self) -> impl Iterator<Item = &PrefabRegistration> {
         self.by_wire_id.values()
     }
 }
 
+/// FNV-1a hash used to derive wire IDs from type paths.
 pub const fn hash_type_path(type_path: &str) -> u64 {
     let bytes = type_path.as_bytes();
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -127,6 +172,7 @@ pub const fn hash_type_path(type_path: &str) -> u64 {
     hash
 }
 
+/// Collects all inventory registrations and stores them in runtime registries.
 pub fn register_sync_components(app: &mut App) {
     app.init_resource::<SyncRegistry>();
     app.init_resource::<SyncResourceRegistry>();
@@ -155,14 +201,17 @@ pub fn register_sync_components(app: &mut App) {
     app.insert_resource(prefab_registry);
 }
 
+/// Poll hook run before the main replication systems.
 pub fn poll_network_incoming(mut net: ResMut<NetResource>) {
     net.poll_incoming();
 }
 
+/// Flushes queued packets after the frame has finished mutating state.
 pub fn flush_network_outbox(mut net: ResMut<NetResource>) {
     net.flush_outbox();
 }
 
+/// Sends updated sync components for entities that are added or changed.
 pub fn sync_component<T: SyncComponent>(
     mut net: ResMut<NetResource>,
     query: Query<(&NetworkId, &T), (With<Replicated>, Or<(Added<T>, Changed<T>)>)>,
@@ -182,6 +231,7 @@ pub fn sync_component<T: SyncComponent>(
     }
 }
 
+/// Sends updated resources when they are added or changed.
 pub fn sync_resource<T: SyncResource>(
     mut net: ResMut<NetResource>,
     resource: Option<Res<T>>,
@@ -202,6 +252,7 @@ pub fn sync_resource<T: SyncResource>(
     });
 }
 
+/// Sends the initial world state to newly connected clients.
 pub fn sync_new_connections(world: &mut World) {
     let is_server = world.resource::<NetResource>().is_server();
     if !is_server {
@@ -266,6 +317,7 @@ pub fn sync_new_connections(world: &mut World) {
     }
 }
 
+/// Applies queued incoming replication packets to the local world.
 pub fn apply_incoming_packets(world: &mut World) {
     let packets = {
         let mut net = world.resource_mut::<NetResource>();
@@ -344,6 +396,7 @@ pub fn apply_incoming_packets(world: &mut World) {
     }
 }
 
+/// Assigns network IDs to newly replicated entities on the server.
 pub fn assign_network_ids(world: &mut World) {
     let is_server = world.resource::<NetResource>().is_server();
     if !is_server {
@@ -381,6 +434,7 @@ pub fn assign_network_ids(world: &mut World) {
     }
 }
 
+/// Detects prefab matches on newly replicated entities.
 pub fn assign_prefab_ids(world: &mut World) {
     let entities = {
         let mut query = world.query_filtered::<Entity, Added<Replicated>>();
@@ -403,6 +457,7 @@ pub fn assign_prefab_ids(world: &mut World) {
     }
 }
 
+/// Converts despawned replicated entities into network despawn packets.
 pub fn replicate_removals(
     mut removed: RemovedComponents<Replicated>,
     mut net: ResMut<NetResource>,

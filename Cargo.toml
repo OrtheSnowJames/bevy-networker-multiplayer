@@ -20,7 +20,7 @@ bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-
 bincode = { version = "2.0.1", features = ["serde"] }
 base64 = "0.22.1"
 inventory = "0.3.21"
-networker-rs = "0.1.6"
+networker-rs = "0.1.8"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [[example]]

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MIT
+//! Bridge between Bevy ECS state and the underlying socket transport.
+//!
+//! `NetResource` owns the client/server socket state, packet queues, and the
+//! list of newly connected peers that need a full-world snapshot.
 use bevy::prelude::*;
-use base64::{engine::general_purpose, Engine as _};
 use bincode::config;
 use networker_rs::net::{EasySocketServer, Socket};
 use std::{
-    net::{SocketAddr, TcpStream},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     thread,
 };
 
 use crate::netmsg::NetMessage;
 
+/// Internal mutable network state protected by a mutex.
 #[derive(Default)]
 struct NetState {
     is_server: Option<bool>,
@@ -23,6 +27,7 @@ struct NetState {
     message_inbox: Vec<RawNetMessage>,
 }
 
+/// Bevy resource that owns the networking transport and packet queues.
 #[derive(Resource, Default)]
 pub struct NetResource {
     state: Arc<Mutex<NetState>>,
@@ -30,44 +35,56 @@ pub struct NetResource {
 }
 
 impl NetResource {
+    /// Creates an empty networking resource.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns `true` when the resource is currently running as server.
     pub fn is_server(&self) -> bool {
         self.state.lock().unwrap().is_server == Some(true)
     }
 
+    /// Connects to a server and binds packet handlers to the new socket.
     pub fn join_server(&mut self, server_address: String) {
         let server_address: SocketAddr = server_address
             .parse()
             .expect("server_address must be a valid socket address");
 
-        let stream = TcpStream::connect(server_address).expect("failed to connect to server");
-        let socket = Socket::new_tcp(stream);
-        self.bind_socket(socket);
+        let socket = Socket::udp(&server_address.to_string()).expect("failed to open UDP socket");
+        self.bind_client_socket(socket);
 
         let mut state = self.state.lock().unwrap();
         state.server_address = Some(server_address);
         state.is_server = Some(false);
     }
 
+    /// Starts the server and installs the connection callback.
     pub fn start_server(&mut self, port: u16) {
         let server = Arc::new(EasySocketServer::new());
         let state = Arc::clone(&self.state);
 
         server.on("connection", move |socket| {
-            let socket_for_listener = socket.clone();
             let state_for_replication = Arc::clone(&state);
-            socket.on("replication", move |payload| {
-                if let Some(raw) = decode_replication_packet(payload) {
+            socket.on_bytes("replication", move |payload| {
+                if let Ok((raw, _)) =
+                    bincode::serde::decode_from_slice::<ReplicationPacket, _>(
+                        payload,
+                        config::standard(),
+                    )
+                {
                     state_for_replication.lock().unwrap().inbox.push(raw);
                 }
             });
 
             let state_for_message = Arc::clone(&state);
-            socket.on("netmsg", move |payload| {
-                if let Some(raw) = decode_raw_net_message(payload) {
+            socket.on_bytes("netmsg", move |payload| {
+                if let Ok((raw, _)) =
+                    bincode::serde::decode_from_slice::<RawNetMessage, _>(
+                        payload,
+                        config::standard(),
+                    )
+                {
                     state_for_message.lock().unwrap().message_inbox.push(raw);
                 }
             });
@@ -75,13 +92,12 @@ impl NetResource {
             let mut state = state.lock().unwrap();
             state.new_connections.push(socket.clone());
             state.connections.push(socket.clone());
-            thread::spawn(move || socket_for_listener.listen_tcp());
         });
 
         let address = format!("0.0.0.0:{port}");
         let server_for_thread = Arc::clone(&server);
         thread::spawn(move || {
-            let _ = server_for_thread.listen_tcp(&address);
+            let _ = server_for_thread.listen_udp(&address);
         });
 
         {
@@ -92,21 +108,24 @@ impl NetResource {
         self.server = Some(server);
     }
 
+    /// Adds a replication packet to the outgoing queue.
     pub fn queue_packet(&mut self, packet: ReplicationPacket) {
         self.state.lock().unwrap().outbox.push(packet);
     }
 
+    /// Sends a replication packet immediately to one socket.
     pub fn send_packet_to(&self, socket: &Socket, packet: ReplicationPacket) {
         let bytes = bincode::serde::encode_to_vec(packet, config::standard())
             .expect("failed to serialize replication packet");
-        let payload = general_purpose::STANDARD.encode(bytes);
-        socket.emit_with("replication", &payload);
+        socket.send_with_reliability("replication", bytes, true);
     }
 
+    /// Injects a packet directly into the incoming queue.
     pub fn inject_packet(&mut self, packet: ReplicationPacket) {
         self.state.lock().unwrap().inbox.push(packet);
     }
 
+    /// Queues a typed network message for broadcast.
     pub fn queue_message<T: NetMessage>(&mut self, message: T) {
         let bytes = bincode::serde::encode_to_vec(&message, config::standard())
             .expect("failed to serialize network message");
@@ -116,22 +135,27 @@ impl NetResource {
         });
     }
 
+    /// Drains all queued outgoing replication packets.
     pub fn drain_outbox(&mut self) -> Vec<ReplicationPacket> {
         self.state.lock().unwrap().outbox.drain(..).collect()
     }
 
+    /// Drains all received replication packets.
     pub fn drain_inbox(&mut self) -> Vec<ReplicationPacket> {
         self.state.lock().unwrap().inbox.drain(..).collect()
     }
 
+    /// Drains sockets that connected since the last snapshot broadcast.
     pub fn drain_new_connections(&mut self) -> Vec<Socket> {
         self.state.lock().unwrap().new_connections.drain(..).collect()
     }
 
+    /// Drains raw messages regardless of wire type.
     pub fn drain_message_inbox(&mut self) -> Vec<RawNetMessage> {
         self.state.lock().unwrap().message_inbox.drain(..).collect()
     }
 
+    /// Extracts only messages of type `T`, leaving the rest queued.
     pub fn drain_messages<T: NetMessage>(&mut self) -> Vec<T> {
         let messages = self.drain_message_inbox();
         let mut matched = Vec::new();
@@ -157,6 +181,7 @@ impl NetResource {
         matched
     }
 
+    /// Serializes and flushes all queued packets to connected clients.
     pub fn flush_outbox(&mut self) {
         let (packets, message_packets, connections) = {
             let state = self.state.lock().unwrap();
@@ -182,77 +207,77 @@ impl NetResource {
         for packet in packets {
             let bytes = bincode::serde::encode_to_vec(packet, config::standard())
                 .expect("failed to serialize replication packet");
-            let payload = general_purpose::STANDARD.encode(bytes);
             for socket in &connections {
-                socket.emit_with("replication", &payload);
+                socket.send_with_reliability("replication", bytes.clone(), true);
             }
         }
 
         for packet in message_packets {
-            let payload = general_purpose::STANDARD.encode(packet.bytes);
             for socket in &connections {
-                socket.emit_with("netmsg", &format!("{}|{}", packet.wire_id, payload));
+                let bytes = bincode::serde::encode_to_vec(&packet, config::standard())
+                    .expect("failed to serialize network message");
+                socket.send_with_reliability("netmsg", bytes, true);
             }
         }
     }
 
+    /// Placeholder hook for future socket polling implementations.
     pub fn poll_incoming(&mut self) {}
 
-    fn bind_socket(&self, socket: Socket) {
+    /// Binds replication and message handlers to a socket.
+    fn bind_client_socket(&self, socket: Socket) {
         let state_for_replication = Arc::clone(&self.state);
         let socket_for_listener = socket.clone();
-        socket.on("replication", move |payload| {
-            if let Some(raw) = decode_replication_packet(payload) {
+        socket.on_bytes("replication", move |payload| {
+            if let Ok((raw, _)) =
+                bincode::serde::decode_from_slice::<ReplicationPacket, _>(payload, config::standard())
+            {
                 state_for_replication.lock().unwrap().inbox.push(raw);
             }
         });
 
         let state_for_message = Arc::clone(&self.state);
-        socket.on("netmsg", move |payload| {
-            if let Some(raw) = decode_raw_net_message(payload) {
+        socket.on_bytes("netmsg", move |payload| {
+            if let Ok((raw, _)) =
+                bincode::serde::decode_from_slice::<RawNetMessage, _>(payload, config::standard())
+            {
                 state_for_message.lock().unwrap().message_inbox.push(raw);
             }
         });
 
         self.state.lock().unwrap().connections.push(socket.clone());
-        thread::spawn(move || socket_for_listener.listen_tcp());
+        thread::spawn(move || socket_for_listener.listen_udp());
     }
 }
 
-#[derive(Debug, Clone)]
+/// Raw wire payload for a typed network message.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawNetMessage {
+    /// Stable wire identifier for the message type.
     pub wire_id: u64,
+    /// Serialized message bytes.
     pub bytes: Vec<u8>,
 }
 
+/// Packet types used by entity and resource replication.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ReplicationPacket {
+    /// Spawn a replicated entity, optionally with a prefab.
     SpawnEntity {
         network_id: u64,
         prefab_wire_id: u64,
     },
+    /// Despawn a replicated entity.
     DespawnEntity { network_id: u64 },
+    /// Update a replicated component on one entity.
     UpdateComponent {
         network_id: u64,
         component_wire_id: u64,
         bytes: Vec<u8>,
     },
+    /// Replace a replicated resource snapshot.
     UpdateResource {
         resource_wire_id: u64,
         bytes: Vec<u8>,
     },
-}
-
-fn decode_replication_packet(payload: &str) -> Option<ReplicationPacket> {
-    let bytes = general_purpose::STANDARD.decode(payload).ok()?;
-    bincode::serde::decode_from_slice::<ReplicationPacket, _>(&bytes, config::standard())
-        .ok()
-        .map(|(packet, _)| packet)
-}
-
-fn decode_raw_net_message(payload: &str) -> Option<RawNetMessage> {
-    let (wire_id, payload) = payload.split_once('|')?;
-    let wire_id = wire_id.parse().ok()?;
-    let bytes = general_purpose::STANDARD.decode(payload).ok()?;
-    Some(RawNetMessage { wire_id, bytes })
 }
