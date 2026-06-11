@@ -7,9 +7,10 @@ use bevy::prelude::*;
 use bincode::config;
 use networker_rs::net::{EasySocketServer, Socket};
 use std::{
-    net::SocketAddr,
+    net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use crate::netmsg::NetMessage;
@@ -51,8 +52,18 @@ impl NetResource {
             .parse()
             .expect("server_address must be a valid socket address");
 
-        let socket = Socket::udp(&server_address.to_string()).expect("failed to open UDP socket");
+        let udp_socket = UdpSocket::bind("0.0.0.0:0").expect("failed to open UDP socket");
+        let socket = Socket::new_udp_with_peer(Arc::new(udp_socket), server_address);
         self.bind_client_socket(socket);
+
+        if let Some(socket) = self.state.lock().unwrap().connections.last().cloned() {
+            thread::spawn(move || {
+                for _ in 0..20 {
+                    socket.send("__networker_join__", []);
+                    thread::sleep(Duration::from_millis(100));
+                }
+            });
+        }
 
         let mut state = self.state.lock().unwrap();
         state.server_address = Some(server_address);
@@ -66,25 +77,28 @@ impl NetResource {
 
         server.on("connection", move |socket| {
             let state_for_replication = Arc::clone(&state);
-            socket.on_bytes("replication", move |payload| {
-                if let Ok((raw, _)) =
-                    bincode::serde::decode_from_slice::<ReplicationPacket, _>(
-                        payload,
-                        config::standard(),
-                    )
-                {
-                    state_for_replication.lock().unwrap().inbox.push(raw);
-                }
-            });
+            socket.on_bytes(
+                "replication",
+                move |payload| match bincode::serde::decode_from_slice::<ReplicationPacket, _>(
+                    payload,
+                    config::standard(),
+                ) {
+                    Ok((raw, _)) => state_for_replication.lock().unwrap().inbox.push(raw),
+                    Err(error) => {
+                        warn!(
+                            "server failed to decode replication packet bytes={} error={error}",
+                            payload.len()
+                        );
+                    }
+                },
+            );
 
             let state_for_message = Arc::clone(&state);
             socket.on_bytes("netmsg", move |payload| {
-                if let Ok((raw, _)) =
-                    bincode::serde::decode_from_slice::<RawNetMessage, _>(
-                        payload,
-                        config::standard(),
-                    )
-                {
+                if let Ok((raw, _)) = bincode::serde::decode_from_slice::<RawNetMessage, _>(
+                    payload,
+                    config::standard(),
+                ) {
                     state_for_message.lock().unwrap().message_inbox.push(raw);
                 }
             });
@@ -97,7 +111,9 @@ impl NetResource {
         let address = format!("0.0.0.0:{port}");
         let server_for_thread = Arc::clone(&server);
         thread::spawn(move || {
-            let _ = server_for_thread.listen_udp(&address);
+            if let Err(error) = server_for_thread.listen_udp(&address) {
+                eprintln!("server failed to listen on {address}: {error}");
+            }
         });
 
         {
@@ -115,9 +131,10 @@ impl NetResource {
 
     /// Sends a replication packet immediately to one socket.
     pub fn send_packet_to(&self, socket: &Socket, packet: ReplicationPacket) {
+        let reliable = packet.requires_reliable_delivery();
         let bytes = bincode::serde::encode_to_vec(packet, config::standard())
             .expect("failed to serialize replication packet");
-        socket.send_with_reliability("replication", bytes, true);
+        socket.send_with_reliability("replication", bytes, reliable);
     }
 
     /// Injects a packet directly into the incoming queue.
@@ -129,10 +146,14 @@ impl NetResource {
     pub fn queue_message<T: NetMessage>(&mut self, message: T) {
         let bytes = bincode::serde::encode_to_vec(&message, config::standard())
             .expect("failed to serialize network message");
-        self.state.lock().unwrap().message_outbox.push(RawNetMessage {
-            wire_id: T::WIRE_ID,
-            bytes,
-        });
+        self.state
+            .lock()
+            .unwrap()
+            .message_outbox
+            .push(RawNetMessage {
+                wire_id: T::WIRE_ID,
+                bytes,
+            });
     }
 
     /// Drains all queued outgoing replication packets.
@@ -147,7 +168,12 @@ impl NetResource {
 
     /// Drains sockets that connected since the last snapshot broadcast.
     pub fn drain_new_connections(&mut self) -> Vec<Socket> {
-        self.state.lock().unwrap().new_connections.drain(..).collect()
+        self.state
+            .lock()
+            .unwrap()
+            .new_connections
+            .drain(..)
+            .collect()
     }
 
     /// Drains raw messages regardless of wire type.
@@ -205,10 +231,11 @@ impl NetResource {
         }
 
         for packet in packets {
+            let reliable = packet.requires_reliable_delivery();
             let bytes = bincode::serde::encode_to_vec(packet, config::standard())
                 .expect("failed to serialize replication packet");
             for socket in &connections {
-                socket.send_with_reliability("replication", bytes.clone(), true);
+                socket.send_with_reliability("replication", bytes.clone(), reliable);
             }
         }
 
@@ -216,7 +243,7 @@ impl NetResource {
             for socket in &connections {
                 let bytes = bincode::serde::encode_to_vec(&packet, config::standard())
                     .expect("failed to serialize network message");
-                socket.send_with_reliability("netmsg", bytes, true);
+                socket.send("netmsg", bytes);
             }
         }
     }
@@ -228,13 +255,21 @@ impl NetResource {
     fn bind_client_socket(&self, socket: Socket) {
         let state_for_replication = Arc::clone(&self.state);
         let socket_for_listener = socket.clone();
-        socket.on_bytes("replication", move |payload| {
-            if let Ok((raw, _)) =
-                bincode::serde::decode_from_slice::<ReplicationPacket, _>(payload, config::standard())
-            {
-                state_for_replication.lock().unwrap().inbox.push(raw);
-            }
-        });
+        socket.on_bytes(
+            "replication",
+            move |payload| match bincode::serde::decode_from_slice::<ReplicationPacket, _>(
+                payload,
+                config::standard(),
+            ) {
+                Ok((raw, _)) => state_for_replication.lock().unwrap().inbox.push(raw),
+                Err(error) => {
+                    warn!(
+                        "client failed to decode replication packet bytes={} error={error}",
+                        payload.len()
+                    );
+                }
+            },
+        );
 
         let state_for_message = Arc::clone(&self.state);
         socket.on_bytes("netmsg", move |payload| {
@@ -280,4 +315,22 @@ pub enum ReplicationPacket {
         resource_wire_id: u64,
         bytes: Vec<u8>,
     },
+}
+
+impl ReplicationPacket {
+    pub fn requires_reliable_delivery(&self) -> bool {
+        matches!(
+            self,
+            Self::SpawnEntity { .. } | Self::DespawnEntity { .. } | Self::UpdateResource { .. }
+        )
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SpawnEntity { .. } => "SpawnEntity",
+            Self::DespawnEntity { .. } => "DespawnEntity",
+            Self::UpdateComponent { .. } => "UpdateComponent",
+            Self::UpdateResource { .. } => "UpdateResource",
+        }
+    }
 }

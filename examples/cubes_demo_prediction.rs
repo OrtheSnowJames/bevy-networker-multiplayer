@@ -56,6 +56,7 @@ fn main() {
         }
         Mode::Client => {
             app.add_systems(Startup, setup_client_window)
+                .add_systems(Update, (client_spawn_missing_visuals, client_log_replication_state))
                 .add_systems(PostUpdate, client_sync_transforms);
         }
     }
@@ -114,6 +115,64 @@ fn server_move_cubes(time: Res<Time>, mut query: Query<(&mut Position, &mut Velo
         if position.0.y > 200.0 || position.0.y < -200.0 {
             velocity.0.y = -velocity.0.y;
         }
+    }
+}
+
+fn client_spawn_missing_visuals(
+    mut commands: Commands,
+    query: Query<
+        (Entity, &Position, Option<&Sprite>, Option<&Transform>),
+        (With<Replicated>, Added<Position>),
+    >,
+) {
+    for (entity, position, sprite, transform) in &query {
+        if sprite.is_none() || transform.is_none() {
+            commands.entity(entity).insert((
+                Sprite::from_color(Color::srgb(0.2, 0.8, 1.0), Vec2::splat(32.0)),
+                Transform::from_xyz(position.0.x, position.0.y, 0.0),
+            ));
+            println!("spawned cube visual for replicated entity {entity:?}");
+        }
+    }
+}
+
+fn client_log_replication_state(
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut announced_ready: Local<bool>,
+    query: Query<(Option<&Sprite>, Option<&Transform>), (With<Replicated>, With<Position>)>,
+) {
+    *elapsed += time.delta_secs();
+    if *elapsed < 1.0 {
+        return;
+    }
+    *elapsed = 0.0;
+
+    let mut positions = 0usize;
+    let mut sprites = 0usize;
+    let mut transforms = 0usize;
+
+    for (sprite, transform) in &query {
+        positions += 1;
+        if sprite.is_some() {
+            sprites += 1;
+        }
+        if transform.is_some() {
+            transforms += 1;
+        }
+    }
+
+    if positions == 0 {
+        println!("waiting for replicated cubes from server...");
+        *announced_ready = false;
+    } else if sprites != positions || transforms != positions {
+        println!(
+            "replicated cubes={positions}, sprites={sprites}, transforms={transforms}"
+        );
+        *announced_ready = false;
+    } else if !*announced_ready {
+        println!("replicated cubes ready: {positions}");
+        *announced_ready = true;
     }
 }
 

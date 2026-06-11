@@ -168,6 +168,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
     let snapshot_fn = format_ident!("__{}_snapshot_sync", ident);
     let prefab_apply_fn = format_ident!("__{}_apply_prefab", ident);
     let prefab_matches_fn = format_ident!("__{}_matches_prefab", ident);
+    let follow_fn = format_ident!("__{}_follow_visual_transform", ident);
 
     let sync_trait = if args.is_resource {
         quote! { SyncResource }
@@ -186,9 +187,21 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         quote! {
             app.add_systems(
                 ::bevy_networker_multiplayer::bevy::prelude::Update,
-                ::bevy_networker_multiplayer::sync::sync_component::<#ident #ty_generics>,
+                ::bevy_networker_multiplayer::sync::sync_component::<#ident #ty_generics>
+                    .after(::bevy_networker_multiplayer::sync::assign_network_ids),
             );
         }
+    };
+
+    let follow_system = if prefab_components.is_some() && is_vec2_tuple_struct(&item) {
+        quote! {
+            app.add_systems(
+                ::bevy_networker_multiplayer::bevy::prelude::PostUpdate,
+                #follow_fn,
+            );
+        }
+    } else {
+        quote! {}
     };
 
     let registration = if args.is_resource {
@@ -311,6 +324,36 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         quote! {}
     };
 
+    let follow_fn_def = if prefab_components.is_some() && is_vec2_tuple_struct(&item) {
+        quote! {
+            #[allow(non_snake_case)]
+            fn #follow_fn(
+                mut query: ::bevy_networker_multiplayer::bevy::prelude::Query<
+                    (
+                        &#ident #ty_generics,
+                        &mut ::bevy_networker_multiplayer::bevy::prelude::Transform,
+                    ),
+                    (
+                        ::bevy_networker_multiplayer::bevy::prelude::With<
+                            ::bevy_networker_multiplayer::replicated::Replicated,
+                        >,
+                        ::bevy_networker_multiplayer::bevy::prelude::Or<(
+                            ::bevy_networker_multiplayer::bevy::prelude::Added<#ident #ty_generics>,
+                            ::bevy_networker_multiplayer::bevy::prelude::Changed<#ident #ty_generics>,
+                        )>,
+                    ),
+                >,
+            ) {
+                for (component, mut transform) in &mut query {
+                    transform.translation.x = component.0.x;
+                    transform.translation.y = component.0.y;
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let apply_fn_def = if args.is_resource {
         quote! {
             #[allow(non_snake_case)]
@@ -385,6 +428,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         #[allow(non_snake_case)]
         fn #register_fn(app: &mut ::bevy_networker_multiplayer::bevy::prelude::App) {
             #register_system
+            #follow_system
         }
 
         #[allow(non_snake_case)]
@@ -394,6 +438,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         #snapshot_fn_def
         #prefab_apply_def
         #prefab_matches_def
+        #follow_fn_def
     }
 }
 

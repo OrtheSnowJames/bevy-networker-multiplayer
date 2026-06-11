@@ -159,6 +159,10 @@ impl PrefabRegistry {
     }
 }
 
+/// Component packets that arrived before their entity spawn packet.
+#[derive(Resource, Default)]
+struct PendingComponentUpdates(Vec<ReplicationPacket>);
+
 /// FNV-1a hash used to derive wire IDs from type paths.
 pub const fn hash_type_path(type_path: &str) -> u64 {
     let bytes = type_path.as_bytes();
@@ -177,6 +181,7 @@ pub fn register_sync_components(app: &mut App) {
     app.init_resource::<SyncRegistry>();
     app.init_resource::<SyncResourceRegistry>();
     app.init_resource::<PrefabRegistry>();
+    app.init_resource::<PendingComponentUpdates>();
 
     let mut registry = SyncRegistry::default();
     for registration in inventory::iter::<ComponentRegistration> {
@@ -319,14 +324,27 @@ pub fn sync_new_connections(world: &mut World) {
 
 /// Applies queued incoming replication packets to the local world.
 pub fn apply_incoming_packets(world: &mut World) {
-    let packets = {
+    let mut packets = {
+        let mut pending = world.resource_mut::<PendingComponentUpdates>();
+        pending.0.drain(..).collect::<Vec<_>>()
+    };
+
+    packets.extend({
         let mut net = world.resource_mut::<NetResource>();
         net.drain_inbox()
-    };
+    });
 
     if packets.is_empty() {
         return;
     }
+
+    packets.sort_by_key(|packet| match packet {
+        ReplicationPacket::SpawnEntity { .. } => 0,
+        ReplicationPacket::UpdateComponent { .. } | ReplicationPacket::UpdateResource { .. } => 1,
+        ReplicationPacket::DespawnEntity { .. } => 2,
+    });
+
+    let mut deferred = Vec::new();
 
     for packet in packets {
         match packet {
@@ -373,8 +391,18 @@ pub fn apply_incoming_packets(world: &mut World) {
                         .copied()
                 };
 
-                if let (Some(entity), Some(registration)) = (entity, registration) {
-                    (registration.apply)(world, entity, &bytes);
+                match (entity, registration) {
+                    (Some(entity), Some(registration)) => {
+                        (registration.apply)(world, entity, &bytes);
+                    }
+                    (None, Some(_)) => {
+                        deferred.push(ReplicationPacket::UpdateComponent {
+                            network_id,
+                            component_wire_id,
+                            bytes,
+                        });
+                    }
+                    _ => {}
                 }
             }
             ReplicationPacket::UpdateResource {
@@ -393,6 +421,13 @@ pub fn apply_incoming_packets(world: &mut World) {
                 }
             }
         }
+    }
+
+    if !deferred.is_empty() {
+        world
+            .resource_mut::<PendingComponentUpdates>()
+            .0
+            .extend(deferred);
     }
 }
 

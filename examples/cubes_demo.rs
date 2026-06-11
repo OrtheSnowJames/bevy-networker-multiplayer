@@ -1,12 +1,12 @@
 use bevy::prelude::*;
-use bevy_networker_multiplayer::{sync, NetResource, Replicated, ReplicatedPlugin};
+use bevy_networker_multiplayer::{NetResource, Replicated, ReplicatedPlugin, sync};
 
 const ADDRESS: &str = "127.0.0.1:5003";
 
-#[sync(prefab(Sprite::from_color(
-    Color::srgb(0.2, 0.8, 1.0),
-    Vec2::splat(32.0),
-), Transform::from_xyz(0.0, 0.0, 0.0)))]
+#[sync(prefab(
+    Sprite::from_color(Color::srgb(0.2, 0.8, 1.0), Vec2::splat(32.0),),
+    Transform::from_xyz(0.0, 0.0, 0.0)
+))]
 #[derive(Component)]
 struct Position(Vec2);
 
@@ -50,8 +50,7 @@ fn main() {
             app.add_systems(Update, server_move_cubes);
         }
         Mode::Client => {
-            app.add_systems(Startup, setup_client_window)
-                .add_systems(PostUpdate, client_sync_transforms);
+            app.add_systems(Startup, setup_client_window);
         }
     }
 
@@ -79,7 +78,10 @@ fn setup(mut commands: Commands, mut net: ResMut<NetResource>, mode: Res<DemoMod
                 commands.spawn((
                     Replicated,
                     Position(Vec2::new(index as f32 * 80.0 - 160.0, 0.0)),
-                    Velocity(Vec2::new(70.0 + index as f32 * 15.0, 40.0 + index as f32 * 10.0)),
+                    Velocity(Vec2::new(
+                        70.0 + index as f32 * 15.0,
+                        40.0 + index as f32 * 10.0,
+                    )),
                 ));
             }
         }
@@ -107,12 +109,5 @@ fn server_move_cubes(time: Res<Time>, mut query: Query<(&mut Position, &mut Velo
         if position.0.y > 200.0 || position.0.y < -200.0 {
             velocity.0.y = -velocity.0.y;
         }
-    }
-}
-
-fn client_sync_transforms(mut query: Query<(&Position, &mut Transform), With<Replicated>>) {
-    for (position, mut transform) in &mut query {
-        transform.translation.x = position.0.x;
-        transform.translation.y = position.0.y;
     }
 }

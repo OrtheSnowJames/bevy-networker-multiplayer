@@ -100,7 +100,7 @@ cargo run --example cubes_demo -- server
 cargo run --example cubes_demo -- client
 ```
 
-The server starts a shared world of replicated cubes and moves them every frame. Each client opens its own window, receives the cube state, and renders the same motion locally. The cube visuals come from `#[sync(prefab(...))]`, so the client does not need custom visual spawn systems. New clients also receive a snapshot of the current state when they connect.
+The server starts a shared world of replicated cubes and moves them every frame. Each client opens its own window, receives the cube state, and renders the same motion locally. The cube visuals come from `#[sync(prefab(...))]`, and the `Position` component automatically drives the spawned `Transform` on the client, so you do not need a separate visual sync system. New clients also receive a snapshot of the current state when they connect.
 
 Client-side movement prediction lives in a separate example:
 

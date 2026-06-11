@@ -73,7 +73,8 @@ impl Plugin for ReplicatedPlugin {
                     sync::replicate_removals,
                     sync::sync_new_connections,
                     sync::apply_incoming_packets,
-                ),
+                )
+                    .chain(),
             )
             .add_systems(PostUpdate, sync::flush_network_outbox);
     }
