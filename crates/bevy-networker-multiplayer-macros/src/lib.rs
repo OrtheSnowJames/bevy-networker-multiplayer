@@ -18,11 +18,15 @@ use syn::{
 struct SyncArgs {
     is_resource: bool,
     prefab_components: Option<Vec<Expr>>,
+    resource_interval: Option<Expr>,
+    resource_heartbeat: Option<Expr>,
 }
 
 enum SyncArg {
     Resource,
     Prefab(Vec<Expr>),
+    Interval(Expr),
+    Heartbeat(Expr),
 }
 
 impl Parse for SyncArg {
@@ -43,6 +47,16 @@ impl Parse for SyncArg {
                 return Ok(Self::Prefab(components));
             }
 
+            if ident == "interval" {
+                input.parse::<Token![=]>()?;
+                return Ok(Self::Interval(input.parse()?));
+            }
+
+            if ident == "heartbeat" {
+                input.parse::<Token![=]>()?;
+                return Ok(Self::Heartbeat(input.parse()?));
+            }
+
             return Err(Error::new_spanned(ident, "unsupported #[sync(...)] argument"));
         }
 
@@ -55,6 +69,8 @@ impl Parse for SyncArgs {
         let args = Punctuated::<SyncArg, Comma>::parse_terminated(input)?;
         let mut is_resource = false;
         let mut prefab_components = None;
+        let mut resource_interval = None;
+        let mut resource_heartbeat = None;
 
         for arg in args {
             match arg {
@@ -64,12 +80,27 @@ impl Parse for SyncArgs {
                 SyncArg::Prefab(components) => {
                     prefab_components = Some(components);
                 }
+                SyncArg::Interval(seconds) => {
+                    resource_interval = Some(seconds);
+                }
+                SyncArg::Heartbeat(seconds) => {
+                    resource_heartbeat = Some(seconds);
+                }
             }
+        }
+
+        if !is_resource && (resource_interval.is_some() || resource_heartbeat.is_some()) {
+            return Err(Error::new(
+                input.span(),
+                "`interval` and `heartbeat` are only supported with #[sync(resource)]",
+            ));
         }
 
         Ok(Self {
             is_resource,
             prefab_components,
+            resource_interval,
+            resource_heartbeat,
         })
     }
 }
@@ -115,6 +146,8 @@ fn parse_sync_args(args: TokenStream) -> Result<SyncArgs, TokenStream> {
         return Ok(SyncArgs {
             is_resource: false,
             prefab_components: None,
+            resource_interval: None,
+            resource_heartbeat: None,
         });
     }
 
@@ -169,6 +202,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
     let prefab_apply_fn = format_ident!("__{}_apply_prefab", ident);
     let prefab_matches_fn = format_ident!("__{}_matches_prefab", ident);
     let follow_fn = format_ident!("__{}_follow_visual_transform", ident);
+    let resource_sync_fn = format_ident!("__{}_sync_resource", ident);
 
     let sync_trait = if args.is_resource {
         quote! { SyncResource }
@@ -180,7 +214,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         quote! {
             app.add_systems(
                 ::bevy_networker_multiplayer::bevy::prelude::Update,
-                ::bevy_networker_multiplayer::sync::sync_resource::<#ident #ty_generics>,
+                #resource_sync_fn,
             );
         }
     } else {
@@ -250,6 +284,49 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
                 }
             }
         }
+    };
+
+    let resource_interval = args
+        .resource_interval
+        .clone()
+        .unwrap_or_else(|| syn::parse_quote!(0.0));
+    let resource_heartbeat = args
+        .resource_heartbeat
+        .clone()
+        .map(|heartbeat| quote! { Some((#heartbeat) as f32) })
+        .unwrap_or_else(|| quote! { None });
+
+    let resource_sync_fn_def = if args.is_resource {
+        quote! {
+            #[allow(non_snake_case)]
+            fn #resource_sync_fn(
+                time: ::bevy_networker_multiplayer::bevy::prelude::Res<
+                    ::bevy_networker_multiplayer::bevy::prelude::Time,
+                >,
+                mut net: ::bevy_networker_multiplayer::bevy::prelude::ResMut<
+                    ::bevy_networker_multiplayer::NetResource,
+                >,
+                resource: Option<
+                    ::bevy_networker_multiplayer::bevy::prelude::Res<#ident #ty_generics>,
+                >,
+                mut state: ::bevy_networker_multiplayer::bevy::prelude::Local<
+                    ::bevy_networker_multiplayer::sync::SyncResourceSendState,
+                >,
+            ) {
+                ::bevy_networker_multiplayer::sync::sync_resource_with_settings::<#ident #ty_generics>(
+                    &time,
+                    &mut net,
+                    resource,
+                    &mut state,
+                    ::bevy_networker_multiplayer::sync::SyncResourceSettings {
+                        min_interval_seconds: (#resource_interval) as f32,
+                        heartbeat_seconds: #resource_heartbeat,
+                    },
+                );
+            }
+        }
+    } else {
+        quote! {}
     };
 
     let snapshot_fn_def = if args.is_resource {
@@ -358,12 +435,10 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         quote! {
             #[allow(non_snake_case)]
             fn #apply_fn(world: &mut ::bevy_networker_multiplayer::bevy::prelude::World, bytes: &[u8]) {
-                let (resource, _): (#ident #ty_generics, usize) = ::bevy_networker_multiplayer::bincode::serde::decode_from_slice(
+                ::bevy_networker_multiplayer::sync::apply_resource_update::<#ident #ty_generics>(
+                    world,
                     bytes,
-                    ::bevy_networker_multiplayer::bincode::config::standard(),
-                ).expect("failed to deserialize sync resource");
-
-                world.insert_resource(resource);
+                );
             }
         }
     } else if prefab_components.is_some() {
@@ -435,6 +510,7 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
         fn #prefab_register_fn(_app: &mut ::bevy_networker_multiplayer::bevy::prelude::App) {}
 
         #registration
+        #resource_sync_fn_def
         #snapshot_fn_def
         #prefab_apply_def
         #prefab_matches_def

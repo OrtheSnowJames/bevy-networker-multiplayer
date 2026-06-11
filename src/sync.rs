@@ -7,7 +7,7 @@
 //! directions.
 use bevy::prelude::*;
 use bincode::config;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 
 use crate::{
@@ -80,7 +80,8 @@ impl SyncRegistry {
     /// Registers one component handler.
     pub fn register(&mut self, registration: ComponentRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
-        self.by_type_path.insert(registration.type_path, registration);
+        self.by_type_path
+            .insert(registration.type_path, registration);
     }
 
     /// Looks up a component handler by wire ID.
@@ -100,7 +101,8 @@ impl SyncResourceRegistry {
     /// Registers one resource handler.
     pub fn register(&mut self, registration: ResourceRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
-        self.by_type_path.insert(registration.type_path, registration);
+        self.by_type_path
+            .insert(registration.type_path, registration);
     }
 
     /// Looks up a resource handler by wire ID.
@@ -145,7 +147,8 @@ impl PrefabRegistry {
     /// Registers one prefab handler.
     pub fn register(&mut self, registration: PrefabRegistration) {
         self.by_wire_id.insert(registration.wire_id, registration);
-        self.by_type_path.insert(registration.type_path, registration);
+        self.by_type_path
+            .insert(registration.type_path, registration);
     }
 
     /// Looks up a prefab handler by wire ID.
@@ -162,6 +165,48 @@ impl PrefabRegistry {
 /// Component packets that arrived before their entity spawn packet.
 #[derive(Resource, Default)]
 struct PendingComponentUpdates(Vec<ReplicationPacket>);
+
+/// Runtime options for syncing a resource.
+#[derive(Clone, Copy, Debug)]
+pub struct SyncResourceSettings {
+    /// Minimum seconds between sends for this resource type.
+    ///
+    /// When a resource changes faster than this interval, the latest serialized
+    /// value is coalesced and sent once the interval has elapsed.
+    pub min_interval_seconds: f32,
+    /// Optional unchanged-state heartbeat.
+    ///
+    /// This is useful for lossy state streams. Reliable resources generally do
+    /// not need a heartbeat.
+    pub heartbeat_seconds: Option<f32>,
+}
+
+impl Default for SyncResourceSettings {
+    fn default() -> Self {
+        Self {
+            min_interval_seconds: 0.0,
+            heartbeat_seconds: None,
+        }
+    }
+}
+
+/// Per-system state used to dedupe and coalesce resource snapshots.
+#[derive(Debug)]
+pub struct SyncResourceSendState {
+    last_sent_bytes: Option<Vec<u8>>,
+    pending_bytes: Option<Vec<u8>>,
+    seconds_since_send: f32,
+}
+
+impl Default for SyncResourceSendState {
+    fn default() -> Self {
+        Self {
+            last_sent_bytes: None,
+            pending_bytes: None,
+            seconds_since_send: f32::INFINITY,
+        }
+    }
+}
 
 /// FNV-1a hash used to derive wire IDs from type paths.
 pub const fn hash_type_path(type_path: &str) -> u64 {
@@ -238,23 +283,91 @@ pub fn sync_component<T: SyncComponent>(
 
 /// Sends updated resources when they are added or changed.
 pub fn sync_resource<T: SyncResource>(
+    time: Res<Time>,
     mut net: ResMut<NetResource>,
     resource: Option<Res<T>>,
+    mut state: Local<SyncResourceSendState>,
+) {
+    sync_resource_with_settings::<T>(
+        &time,
+        &mut net,
+        resource,
+        &mut state,
+        SyncResourceSettings::default(),
+    );
+}
+
+/// Sends updated resources with byte-level dedupe and optional send coalescing.
+pub fn sync_resource_with_settings<T: SyncResource>(
+    time: &Time,
+    net: &mut NetResource,
+    resource: Option<Res<T>>,
+    state: &mut SyncResourceSendState,
+    settings: SyncResourceSettings,
 ) {
     let Some(resource) = resource else {
         return;
     };
 
-    if !net.is_server() || !(resource.is_added() || resource.is_changed()) {
+    if !net.is_server() {
         return;
     }
 
-    let bytes = bincode::serde::encode_to_vec(&*resource, config::standard())
-        .expect("failed to serialize sync resource");
+    state.seconds_since_send += time.delta_secs();
+
+    if resource.is_added() || resource.is_changed() {
+        let bytes = bincode::serde::encode_to_vec(&*resource, config::standard())
+            .expect("failed to serialize sync resource");
+
+        if state.last_sent_bytes.as_ref() != Some(&bytes) {
+            state.pending_bytes = Some(bytes);
+        }
+    }
+
+    let heartbeat_due = settings
+        .heartbeat_seconds
+        .map(|seconds| state.seconds_since_send >= seconds.max(0.0))
+        .unwrap_or(false);
+
+    if state.pending_bytes.is_none() && heartbeat_due {
+        state.pending_bytes = state.last_sent_bytes.clone().or_else(|| {
+            Some(
+                bincode::serde::encode_to_vec(&*resource, config::standard())
+                    .expect("failed to serialize sync resource"),
+            )
+        });
+    }
+
+    let interval_ready = state.seconds_since_send >= settings.min_interval_seconds.max(0.0);
+    if state.pending_bytes.is_none() || (!interval_ready && !heartbeat_due) {
+        return;
+    }
+
+    let bytes = state
+        .pending_bytes
+        .take()
+        .expect("pending resource bytes should exist");
     net.queue_packet(ReplicationPacket::UpdateResource {
         resource_wire_id: T::WIRE_ID,
-        bytes,
+        bytes: bytes.clone(),
     });
+    state.last_sent_bytes = Some(bytes);
+    state.seconds_since_send = 0.0;
+}
+
+/// Applies a resource snapshot only when the serialized value actually changed.
+pub fn apply_resource_update<T: SyncResource>(world: &mut World, bytes: &[u8]) {
+    if let Some(existing) = world.get_resource::<T>() {
+        let existing_bytes = bincode::serde::encode_to_vec(existing, config::standard())
+            .expect("failed to serialize existing sync resource");
+        if existing_bytes == bytes {
+            return;
+        }
+    }
+
+    let (resource, _): (T, usize) = bincode::serde::decode_from_slice(bytes, config::standard())
+        .expect("failed to deserialize sync resource");
+    world.insert_resource(resource);
 }
 
 /// Sends the initial world state to newly connected clients.
@@ -274,20 +387,24 @@ pub fn sync_new_connections(world: &mut World) {
     }
 
     let component_registrations: Vec<ComponentRegistration> =
-        inventory::iter::<ComponentRegistration>().copied().collect();
+        inventory::iter::<ComponentRegistration>()
+            .copied()
+            .collect();
     let resource_registrations: Vec<ResourceRegistration> =
         inventory::iter::<ResourceRegistration>().copied().collect();
 
     for socket in &connections {
         let replicated_entities = {
-            let mut query = world.query_filtered::<
-                (Entity, &NetworkId, Option<&PrefabId>),
-                With<Replicated>,
-            >();
+            let mut query =
+                world.query_filtered::<(Entity, &NetworkId, Option<&PrefabId>), With<Replicated>>();
             query
                 .iter(world)
                 .map(|(entity, network_id, prefab_id)| {
-                    (entity, *network_id, prefab_id.map(|prefab_id| prefab_id.0).unwrap_or(0))
+                    (
+                        entity,
+                        *network_id,
+                        prefab_id.map(|prefab_id| prefab_id.0).unwrap_or(0),
+                    )
                 })
                 .collect::<Vec<_>>()
         };
@@ -313,7 +430,10 @@ pub fn sync_new_connections(world: &mut World) {
                 );
             }
 
-            for packets in component_snapshots.into_iter().chain(resource_snapshots.into_iter()) {
+            for packets in component_snapshots
+                .into_iter()
+                .chain(resource_snapshots.into_iter())
+            {
                 for packet in packets {
                     net.send_packet_to(socket, packet);
                 }
@@ -357,7 +477,9 @@ pub fn apply_incoming_packets(world: &mut World) {
                     .insert(Replicated)
                     .insert(NetworkId(network_id))
                     .id();
-                world.resource_mut::<EntityIndex>().insert(NetworkId(network_id), entity);
+                world
+                    .resource_mut::<EntityIndex>()
+                    .insert(NetworkId(network_id), entity);
                 if prefab_wire_id != 0 {
                     if let Some(registration) = world
                         .resource::<PrefabRegistry>()
@@ -370,12 +492,12 @@ pub fn apply_incoming_packets(world: &mut World) {
                 }
             }
             ReplicationPacket::DespawnEntity { network_id } => {
-                let entity = world.resource::<EntityIndex>().entity(NetworkId(network_id));
+                let entity = world
+                    .resource::<EntityIndex>()
+                    .entity(NetworkId(network_id));
                 if let Some(entity) = entity {
                     world.despawn(entity);
-                    world
-                        .resource_mut::<EntityIndex>()
-                        .remove_entity(entity);
+                    world.resource_mut::<EntityIndex>().remove_entity(entity);
                 }
             }
             ReplicationPacket::UpdateComponent {
@@ -383,7 +505,9 @@ pub fn apply_incoming_packets(world: &mut World) {
                 component_wire_id,
                 bytes,
             } => {
-                let entity = world.resource::<EntityIndex>().entity(NetworkId(network_id));
+                let entity = world
+                    .resource::<EntityIndex>()
+                    .entity(NetworkId(network_id));
                 let registration = {
                     world
                         .resource::<SyncRegistry>()
@@ -460,12 +584,12 @@ pub fn assign_network_ids(world: &mut World) {
             .get::<PrefabId>()
             .map(|prefab_id| prefab_id.0)
             .unwrap_or(0);
-        world.resource_mut::<NetResource>().queue_packet(
-            ReplicationPacket::SpawnEntity {
+        world
+            .resource_mut::<NetResource>()
+            .queue_packet(ReplicationPacket::SpawnEntity {
                 network_id: network_id.0,
                 prefab_wire_id,
-            },
-        );
+            });
     }
 }
 
@@ -476,7 +600,8 @@ pub fn assign_prefab_ids(world: &mut World) {
         query.iter(world).collect::<Vec<_>>()
     };
 
-    let registrations: Vec<PrefabRegistration> = inventory::iter::<PrefabRegistration>().copied().collect();
+    let registrations: Vec<PrefabRegistration> =
+        inventory::iter::<PrefabRegistration>().copied().collect();
 
     for entity in entities {
         if world.entity(entity).contains::<PrefabId>() {
@@ -485,7 +610,9 @@ pub fn assign_prefab_ids(world: &mut World) {
 
         for registration in &registrations {
             if (registration.matches)(world, entity) {
-                world.entity_mut(entity).insert(PrefabId(registration.wire_id));
+                world
+                    .entity_mut(entity)
+                    .insert(PrefabId(registration.wire_id));
                 break;
             }
         }

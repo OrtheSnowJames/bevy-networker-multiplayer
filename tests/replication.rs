@@ -1,15 +1,13 @@
 use bevy::prelude::*;
-#[cfg(feature = "prediction")]
 use bevy::time::TimeUpdateStrategy;
 #[cfg(feature = "prediction")]
 use bevy_networker_multiplayer::{LinearMotionPredictionPlugin, PredictLinearMotion, Velocity2d};
 use bevy_networker_multiplayer::{
+    ReplicatedPlugin,
     netres::{NetResource, ReplicationPacket},
     replicated::{EntityIndex, NetworkId, Replicated},
     sync,
-    ReplicatedPlugin,
 };
-#[cfg(feature = "prediction")]
 use std::time::Duration;
 
 #[sync]
@@ -40,6 +38,21 @@ struct PredictedVelocity(Vec2);
 #[derive(Resource)]
 struct MatchState {
     score: u32,
+}
+
+#[sync(resource, interval = 0.5)]
+#[derive(Resource)]
+struct SlowMatchState {
+    score: u32,
+}
+
+#[derive(Resource, Default)]
+struct ChangedReads(u32);
+
+fn count_match_state_changes(state: Option<Res<MatchState>>, mut reads: ResMut<ChangedReads>) {
+    if state.map(|state| state.is_changed()).unwrap_or(false) {
+        reads.0 += 1;
+    }
 }
 
 #[test]
@@ -86,12 +99,18 @@ fn replicated_resources_queue_and_apply_updates() {
     let mut server = App::new();
     server.add_plugins(MinimalPlugins);
     server.add_plugins(ReplicatedPlugin);
-    server.world_mut().resource_mut::<NetResource>().start_server(0);
+    server
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .start_server(0);
     server.world_mut().insert_resource(MatchState { score: 7 });
 
     server.update();
 
-    let packets = server.world_mut().resource_mut::<NetResource>().drain_outbox();
+    let packets = server
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .drain_outbox();
     assert_eq!(packets.len(), 1);
 
     let bytes = match &packets[0] {
@@ -123,6 +142,133 @@ fn replicated_resources_queue_and_apply_updates() {
 
     let resource = client.world().resource::<MatchState>();
     assert_eq!(resource.score, 7);
+}
+
+#[test]
+fn replicated_resources_skip_semantically_identical_changes() {
+    let mut server = App::new();
+    server.add_plugins(MinimalPlugins);
+    server.add_plugins(ReplicatedPlugin);
+    server
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .start_server(0);
+    server.world_mut().insert_resource(MatchState { score: 7 });
+
+    server.update();
+    assert_eq!(
+        server
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .drain_outbox()
+            .len(),
+        1
+    );
+
+    server.world_mut().resource_mut::<MatchState>().score = 7;
+    server.update();
+    assert!(
+        server
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .drain_outbox()
+            .is_empty()
+    );
+
+    server.world_mut().resource_mut::<MatchState>().score = 8;
+    server.update();
+    assert_eq!(
+        server
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .drain_outbox()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn replicated_resources_coalesce_fast_changes() {
+    let mut server = App::new();
+    server.add_plugins(MinimalPlugins);
+    server.add_plugins(ReplicatedPlugin);
+    server.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+    server
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .start_server(0);
+    server
+        .world_mut()
+        .insert_resource(SlowMatchState { score: 1 });
+
+    server.update();
+    assert_eq!(
+        server
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .drain_outbox()
+            .len(),
+        1
+    );
+
+    server.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        100,
+    )));
+    server.world_mut().resource_mut::<SlowMatchState>().score = 2;
+    server.update();
+    assert!(
+        server
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .drain_outbox()
+            .is_empty()
+    );
+
+    server.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+    server.update();
+    server.update();
+    let packets = server
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .drain_outbox();
+    assert_eq!(packets.len(), 1);
+
+    let bytes = match &packets[0] {
+        ReplicationPacket::UpdateResource { bytes, .. } => bytes,
+        other => panic!("unexpected packet: {other:?}"),
+    };
+    let (state, _): (SlowMatchState, usize) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .expect("slow state should deserialize");
+    assert_eq!(state.score, 2);
+}
+
+#[test]
+fn duplicate_resource_packets_do_not_mark_resource_changed() {
+    let bytes = bincode::serde::encode_to_vec(MatchState { score: 7 }, bincode::config::standard())
+        .expect("match state should serialize");
+
+    let mut client = App::new();
+    client.add_plugins(MinimalPlugins);
+    client.add_plugins(ReplicatedPlugin);
+    client.init_resource::<ChangedReads>();
+    client.add_systems(Update, count_match_state_changes);
+    client.world_mut().insert_resource(MatchState { score: 7 });
+
+    client.update();
+    client.world_mut().resource_mut::<ChangedReads>().0 = 0;
+
+    client
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .inject_packet(ReplicationPacket::UpdateResource {
+            resource_wire_id: <MatchState as sync::SyncResource>::WIRE_ID,
+            bytes,
+        });
+    sync::apply_incoming_packets(client.world_mut());
+    client.update();
+
+    assert_eq!(client.world().resource::<ChangedReads>().0, 0);
 }
 
 #[test]
