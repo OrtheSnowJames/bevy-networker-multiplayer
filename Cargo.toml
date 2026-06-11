@@ -1,6 +1,6 @@
 [package]
 name = "bevy-networker-multiplayer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 description = "Tiny Bevy networking plugin with automatic entity replication and resource sync."
@@ -20,7 +20,7 @@ bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-
 bincode = { version = "2.0.1", features = ["serde"] }
 base64 = "0.22.1"
 inventory = "0.3.21"
-networker-rs = "0.1.8"
+networker-rs = "0.1.9"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [[example]]
