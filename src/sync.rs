@@ -166,6 +166,50 @@ impl PrefabRegistry {
 #[derive(Resource, Default)]
 struct PendingComponentUpdates(Vec<ReplicationPacket>);
 
+/// Sequence tracking for lossy component update streams.
+#[derive(Debug, Resource)]
+#[doc(hidden)]
+pub struct ComponentUpdateSequenceState {
+    next_outgoing: u64,
+    latest_incoming: HashMap<(u64, u64), u64>,
+}
+
+impl Default for ComponentUpdateSequenceState {
+    fn default() -> Self {
+        Self {
+            next_outgoing: 1,
+            latest_incoming: HashMap::new(),
+        }
+    }
+}
+
+impl ComponentUpdateSequenceState {
+    fn next_outgoing(&mut self) -> u64 {
+        let sequence = self.next_outgoing;
+        self.next_outgoing = self.next_outgoing.saturating_add(1);
+        sequence
+    }
+
+    fn accept_incoming(&mut self, network_id: u64, component_wire_id: u64, sequence: u64) -> bool {
+        let key = (network_id, component_wire_id);
+        if self
+            .latest_incoming
+            .get(&key)
+            .is_some_and(|latest| *latest >= sequence)
+        {
+            return false;
+        }
+
+        self.latest_incoming.insert(key, sequence);
+        true
+    }
+
+    fn forget_network_id(&mut self, network_id: u64) {
+        self.latest_incoming
+            .retain(|(stored_network_id, _), _| *stored_network_id != network_id);
+    }
+}
+
 /// Runtime options for syncing a resource.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncResourceSettings {
@@ -227,6 +271,7 @@ pub fn register_sync_components(app: &mut App) {
     app.init_resource::<SyncResourceRegistry>();
     app.init_resource::<PrefabRegistry>();
     app.init_resource::<PendingComponentUpdates>();
+    app.init_resource::<ComponentUpdateSequenceState>();
 
     let mut registry = SyncRegistry::default();
     for registration in inventory::iter::<ComponentRegistration> {
@@ -251,6 +296,14 @@ pub fn register_sync_components(app: &mut App) {
     app.insert_resource(prefab_registry);
 }
 
+/// Returns the next outgoing component update sequence.
+#[doc(hidden)]
+pub fn next_component_update_sequence(world: &mut World) -> u64 {
+    world
+        .resource_mut::<ComponentUpdateSequenceState>()
+        .next_outgoing()
+}
+
 /// Poll hook run before the main replication systems.
 pub fn poll_network_incoming(mut net: ResMut<NetResource>) {
     net.poll_incoming();
@@ -264,6 +317,7 @@ pub fn flush_network_outbox(mut net: ResMut<NetResource>) {
 /// Sends updated sync components for entities that are added or changed.
 pub fn sync_component<T: SyncComponent>(
     mut net: ResMut<NetResource>,
+    mut sequence_state: ResMut<ComponentUpdateSequenceState>,
     query: Query<(&NetworkId, &T), (With<Replicated>, Or<(Added<T>, Changed<T>)>)>,
 ) {
     if !net.is_server() {
@@ -276,6 +330,7 @@ pub fn sync_component<T: SyncComponent>(
         net.queue_packet(ReplicationPacket::UpdateComponent {
             network_id: network_id.0,
             component_wire_id: T::WIRE_ID,
+            sequence: sequence_state.next_outgoing(),
             bytes,
         });
     }
@@ -498,11 +553,15 @@ pub fn apply_incoming_packets(world: &mut World) {
                 if let Some(entity) = entity {
                     world.despawn(entity);
                     world.resource_mut::<EntityIndex>().remove_entity(entity);
+                    world
+                        .resource_mut::<ComponentUpdateSequenceState>()
+                        .forget_network_id(network_id);
                 }
             }
             ReplicationPacket::UpdateComponent {
                 network_id,
                 component_wire_id,
+                sequence,
                 bytes,
             } => {
                 let entity = world
@@ -517,12 +576,18 @@ pub fn apply_incoming_packets(world: &mut World) {
 
                 match (entity, registration) {
                     (Some(entity), Some(registration)) => {
-                        (registration.apply)(world, entity, &bytes);
+                        let is_fresh = world
+                            .resource_mut::<ComponentUpdateSequenceState>()
+                            .accept_incoming(network_id, component_wire_id, sequence);
+                        if is_fresh {
+                            (registration.apply)(world, entity, &bytes);
+                        }
                     }
                     (None, Some(_)) => {
                         deferred.push(ReplicationPacket::UpdateComponent {
                             network_id,
                             component_wire_id,
+                            sequence,
                             bytes,
                         });
                     }

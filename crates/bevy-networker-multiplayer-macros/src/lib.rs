@@ -1,18 +1,11 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
+    Data, DeriveInput, Error, Expr, Fields, ItemStruct, Path, Token,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
     token::Comma,
-    Data,
-    Expr,
-    Error,
-    Fields,
-    DeriveInput,
-    ItemStruct,
-    Path,
-    Token,
 };
 
 struct SyncArgs {
@@ -57,7 +50,10 @@ impl Parse for SyncArg {
                 return Ok(Self::Heartbeat(input.parse()?));
             }
 
-            return Err(Error::new_spanned(ident, "unsupported #[sync(...)] argument"));
+            return Err(Error::new_spanned(
+                ident,
+                "unsupported #[sync(...)] argument",
+            ));
         }
 
         Err(lookahead.error())
@@ -119,12 +115,9 @@ pub fn sync(args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn netmsg(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
         let args_tokens: proc_macro2::TokenStream = args.into();
-        return Error::new_spanned(
-            args_tokens,
-            "#[netmsg] does not take any arguments",
-        )
-        .to_compile_error()
-        .into();
+        return Error::new_spanned(args_tokens, "#[netmsg] does not take any arguments")
+            .to_compile_error()
+            .into();
     }
 
     let item = parse_macro_input!(input as ItemStruct);
@@ -151,8 +144,7 @@ fn parse_sync_args(args: TokenStream) -> Result<SyncArgs, TokenStream> {
         });
     }
 
-    syn::parse::<SyncArgs>(args)
-        .map_err(|error| -> TokenStream { error.to_compile_error().into() })
+    syn::parse::<SyncArgs>(args).map_err(|error| -> TokenStream { error.to_compile_error().into() })
 }
 
 fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream {
@@ -186,8 +178,9 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
     }
 
     if args.is_resource {
-        let required = syn::parse_str::<Path>("::bevy_networker_multiplayer::bevy::prelude::Resource")
-            .unwrap();
+        let required =
+            syn::parse_str::<Path>("::bevy_networker_multiplayer::bevy::prelude::Resource")
+                .unwrap();
         if !has_derive(&derive_paths, &required) {
             derive_paths.push(required);
         }
@@ -355,21 +348,31 @@ fn expand_sync(mut item: ItemStruct, args: SyncArgs) -> proc_macro2::TokenStream
             #[allow(non_snake_case)]
             fn #snapshot_fn(world: &mut ::bevy_networker_multiplayer::bevy::prelude::World) -> ::std::vec::Vec<::bevy_networker_multiplayer::netres::ReplicationPacket> {
                 let mut packets = ::std::vec::Vec::new();
-                let mut query = world.query_filtered::<(
-                    ::bevy_networker_multiplayer::bevy::prelude::Entity,
-                    &::bevy_networker_multiplayer::replicated::NetworkId,
-                    &#ident #ty_generics,
-                ), ::bevy_networker_multiplayer::bevy::prelude::With<::bevy_networker_multiplayer::replicated::Replicated>>();
+                let component_wire_id = ::bevy_networker_multiplayer::sync::hash_type_path(concat!(module_path!(), "::", stringify!(#ident)));
+                let updates = {
+                    let mut updates = ::std::vec::Vec::new();
+                    let mut query = world.query_filtered::<(
+                        ::bevy_networker_multiplayer::bevy::prelude::Entity,
+                        &::bevy_networker_multiplayer::replicated::NetworkId,
+                        &#ident #ty_generics,
+                    ), ::bevy_networker_multiplayer::bevy::prelude::With<::bevy_networker_multiplayer::replicated::Replicated>>();
 
-                for (_, network_id, component) in query.iter(world) {
-                    let bytes = ::bevy_networker_multiplayer::bincode::serde::encode_to_vec(
-                        component,
-                        ::bevy_networker_multiplayer::bincode::config::standard(),
-                    ).expect("failed to serialize sync component");
+                    for (_, network_id, component) in query.iter(world) {
+                        let bytes = ::bevy_networker_multiplayer::bincode::serde::encode_to_vec(
+                            component,
+                            ::bevy_networker_multiplayer::bincode::config::standard(),
+                        ).expect("failed to serialize sync component");
+                        updates.push((network_id.0, bytes));
+                    }
 
+                    updates
+                };
+
+                for (network_id, bytes) in updates {
                     packets.push(::bevy_networker_multiplayer::netres::ReplicationPacket::UpdateComponent {
-                        network_id: network_id.0,
-                        component_wire_id: ::bevy_networker_multiplayer::sync::hash_type_path(concat!(module_path!(), "::", stringify!(#ident))),
+                        network_id,
+                        component_wire_id,
+                        sequence: ::bevy_networker_multiplayer::sync::next_component_update_sequence(world),
                         bytes,
                     });
                 }

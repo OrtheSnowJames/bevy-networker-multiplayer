@@ -146,3 +146,4 @@ The client sends chat and shoot messages. The server prints chat, broadcasts a r
 
 - Uses UDP via `networker-rs`
 - I found out [lightyear](https://github.com/cBournhonesque/lightyear/) existed just after making this
+- Latest update: made sure entities don't snap back by dropping late packets

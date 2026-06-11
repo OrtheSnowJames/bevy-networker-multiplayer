@@ -286,6 +286,7 @@ fn component_updates_wait_for_spawn_entity() {
         .inject_packet(ReplicationPacket::UpdateComponent {
             network_id: 9,
             component_wire_id: <Health as sync::SyncComponent>::WIRE_ID,
+            sequence: 1,
             bytes,
         });
 
@@ -314,6 +315,48 @@ fn component_updates_wait_for_spawn_entity() {
         .entity(NetworkId(9))
         .expect("spawn packet should create the replicated entity");
     assert_eq!(client.world().entity(entity).get::<Health>().unwrap().0, 42);
+}
+
+#[test]
+fn stale_component_updates_are_dropped() {
+    let mut client = App::new();
+    client.add_plugins(MinimalPlugins);
+    client.add_plugins(ReplicatedPlugin);
+
+    client
+        .world_mut()
+        .resource_mut::<NetResource>()
+        .inject_packet(ReplicationPacket::SpawnEntity {
+            network_id: 7,
+            prefab_wire_id: 0,
+        });
+    sync::apply_incoming_packets(client.world_mut());
+
+    for (sequence, health) in [(101, 101), (102, 102), (100, 100)] {
+        let bytes = bincode::serde::encode_to_vec(Health(health), bincode::config::standard())
+            .expect("health should serialize");
+        client
+            .world_mut()
+            .resource_mut::<NetResource>()
+            .inject_packet(ReplicationPacket::UpdateComponent {
+                network_id: 7,
+                component_wire_id: <Health as sync::SyncComponent>::WIRE_ID,
+                sequence,
+                bytes,
+            });
+    }
+
+    sync::apply_incoming_packets(client.world_mut());
+
+    let entity = client
+        .world()
+        .resource::<EntityIndex>()
+        .entity(NetworkId(7))
+        .expect("spawn packet should create the replicated entity");
+    assert_eq!(
+        client.world().entity(entity).get::<Health>().unwrap().0,
+        102
+    );
 }
 
 #[test]
@@ -403,11 +446,13 @@ fn prediction_updates_prefab_visual_transform() {
         ReplicationPacket::UpdateComponent {
             network_id: 11,
             component_wire_id: <PredictedPosition as sync::SyncComponent>::WIRE_ID,
+            sequence: 1,
             bytes: position_bytes,
         },
         ReplicationPacket::UpdateComponent {
             network_id: 11,
             component_wire_id: <PredictedVelocity as sync::SyncComponent>::WIRE_ID,
+            sequence: 2,
             bytes: velocity_bytes,
         },
     ] {

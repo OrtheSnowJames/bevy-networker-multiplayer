@@ -1,16 +1,16 @@
 #![cfg(feature = "prediction")]
 use bevy::prelude::*;
 use bevy_networker_multiplayer::{
-    sync, LinearMotionPredictionPlugin, NetResource, PredictLinearMotion, Replicated,
-    ReplicatedPlugin, Velocity2d,
+    LinearMotionPredictionPlugin, NetResource, PredictLinearMotion, Replicated, ReplicatedPlugin,
+    Velocity2d, sync,
 };
 
 const ADDRESS: &str = "127.0.0.1:5003";
 
-#[sync(prefab(Sprite::from_color(
-    Color::srgb(0.2, 0.8, 1.0),
-    Vec2::splat(32.0),
-), Transform::from_xyz(0.0, 0.0, 0.0)))]
+#[sync(prefab(
+    Sprite::from_color(Color::srgb(0.2, 0.8, 1.0), Vec2::splat(32.0),),
+    Transform::from_xyz(0.0, 0.0, 0.0)
+))]
 #[derive(Component, PredictLinearMotion)]
 struct Position(Vec2);
 
@@ -56,7 +56,10 @@ fn main() {
         }
         Mode::Client => {
             app.add_systems(Startup, setup_client_window)
-                .add_systems(Update, (client_spawn_missing_visuals, client_log_replication_state))
+                .add_systems(
+                    Update,
+                    (client_spawn_missing_visuals, client_log_replication_state),
+                )
                 .add_systems(PostUpdate, client_sync_transforms);
         }
     }
@@ -87,7 +90,10 @@ fn setup(mut commands: Commands, mut net: ResMut<NetResource>, mode: Res<DemoMod
                 commands.spawn((
                     Replicated,
                     Position(Vec2::new(index as f32 * 80.0 - 160.0, 0.0)),
-                    Velocity(Vec2::new(70.0 + index as f32 * 15.0, 40.0 + index as f32 * 10.0)),
+                    Velocity(Vec2::new(
+                        70.0 + index as f32 * 15.0,
+                        40.0 + index as f32 * 10.0,
+                    )),
                 ));
             }
         }
@@ -166,9 +172,7 @@ fn client_log_replication_state(
         println!("waiting for replicated cubes from server...");
         *announced_ready = false;
     } else if sprites != positions || transforms != positions {
-        println!(
-            "replicated cubes={positions}, sprites={sprites}, transforms={transforms}"
-        );
+        println!("replicated cubes={positions}, sprites={sprites}, transforms={transforms}");
         *announced_ready = false;
     } else if !*announced_ready {
         println!("replicated cubes ready: {positions}");

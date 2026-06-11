@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Trait implemented by typed network messages.
 ///
 /// `#[netmsg]` generates this automatically for concrete message structs.
-pub trait NetMessage:
-    Serialize + DeserializeOwned + Clone + Send + Sync + 'static
-{
+pub trait NetMessage: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
     /// Fully qualified type path used to produce a stable wire identifier.
     const TYPE_PATH: &'static str;
     /// Stable wire identifier derived from `TYPE_PATH`.

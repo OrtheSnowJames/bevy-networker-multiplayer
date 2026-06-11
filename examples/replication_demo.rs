@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_networker_multiplayer::{sync, NetResource, Replicated, ReplicatedPlugin};
+use bevy_networker_multiplayer::{NetResource, Replicated, ReplicatedPlugin, sync};
 
 const ADDRESS: &str = "127.0.0.1:5001";
 
@@ -57,11 +57,7 @@ fn setup(mut commands: Commands, mut net: ResMut<NetResource>, mode: Res<DemoMod
         Mode::Server => {
             net.start_server(5001);
             println!("server listening on {ADDRESS}");
-            commands.spawn((
-                Replicated,
-                Position(Vec2::ZERO),
-                Health(100),
-            ));
+            commands.spawn((Replicated, Position(Vec2::ZERO), Health(100)));
         }
         Mode::Client => {
             net.join_server(ADDRESS.to_string());

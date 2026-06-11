@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_networker_multiplayer::{netmsg, sync, NetResource, Replicated, ReplicatedPlugin};
+use bevy_networker_multiplayer::{NetResource, Replicated, ReplicatedPlugin, netmsg, sync};
 
 const ADDRESS: &str = "127.0.0.1:5002";
 
@@ -48,16 +48,14 @@ fn main() {
 
     let mut app = App::new();
     if mode == Mode::Client {
-        app.add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Bevy Netvent Multiplayer".into(),
-                    resolution: (960, 540).into(),
-                    ..default()
-                }),
+        app.add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Bevy Netvent Multiplayer".into(),
+                resolution: (960, 540).into(),
                 ..default()
             }),
-        );
+            ..default()
+        }));
     } else {
         app.add_plugins(MinimalPlugins);
     }
@@ -70,11 +68,7 @@ fn main() {
             app.add_systems(Update, (server_handle_messages, server_move_projectiles));
         }
         Mode::Client => {
-            app.add_systems(
-                Startup,
-                setup_client_window,
-            )
-            .add_systems(
+            app.add_systems(Startup, setup_client_window).add_systems(
                 Update,
                 (
                     client_send_messages,
@@ -117,10 +111,7 @@ fn setup_client_window(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
 
-fn server_handle_messages(
-    mut commands: Commands,
-    mut net: ResMut<NetResource>,
-) {
+fn server_handle_messages(mut commands: Commands, mut net: ResMut<NetResource>) {
     for chat in net.drain_messages::<ChatSend>() {
         println!("chat: {}", chat.text);
         net.queue_message(ChatBroadcast {
@@ -129,7 +120,10 @@ fn server_handle_messages(
     }
 
     for shot in net.drain_messages::<ShootProjectile>() {
-        println!("shoot request from client: {:?} -> {:?}", shot.origin, shot.direction);
+        println!(
+            "shoot request from client: {:?} -> {:?}",
+            shot.origin, shot.direction
+        );
         commands.spawn((
             Replicated,
             Projectile,
@@ -148,11 +142,7 @@ fn server_move_projectiles(
     }
 }
 
-fn client_send_messages(
-    time: Res<Time>,
-    mut tick: Local<f32>,
-    mut net: ResMut<NetResource>,
-) {
+fn client_send_messages(time: Res<Time>, mut tick: Local<f32>, mut net: ResMut<NetResource>) {
     *tick += time.delta_secs();
     if *tick < 1.0 {
         return;

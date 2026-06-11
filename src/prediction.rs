@@ -4,8 +4,8 @@
 //! position and which component provides velocity. The plugin only applies the
 //! interpolation step on clients.
 
-use bevy::prelude::*;
 use bevy::ecs::component::Mutable;
+use bevy::prelude::*;
 
 use crate::replicated::Replicated;
 
@@ -56,8 +56,7 @@ pub fn predict_linear_motion<P, V>(
     time: Res<Time>,
     net: Res<crate::NetResource>,
     mut query: Query<(&mut P, &V), With<Replicated>>,
-)
-where
+) where
     P: PredictLinearMotion,
     V: Velocity2d,
 {

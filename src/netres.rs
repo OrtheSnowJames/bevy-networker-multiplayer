@@ -308,6 +308,7 @@ pub enum ReplicationPacket {
     UpdateComponent {
         network_id: u64,
         component_wire_id: u64,
+        sequence: u64,
         bytes: Vec<u8>,
     },
     /// Replace a replicated resource snapshot.
