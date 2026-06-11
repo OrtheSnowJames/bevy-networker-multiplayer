@@ -16,7 +16,7 @@ members = ["crates/bevy-networker-multiplayer-macros"]
 
 [dependencies]
 bevy = "0.18.1"
-bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-macros" }
+bevy-networker-multiplayer-macros = { path = "crates/bevy-networker-multiplayer-macros", version = "0.1.0" }
 bincode = { version = "2.0.1", features = ["serde"] }
 base64 = "0.22.1"
 inventory = "0.3.21"
